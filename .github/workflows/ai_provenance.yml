@@ -1,0 +1,54 @@
+# AI Provenance (Layer 4). Installed as .github/workflows/ai_provenance.yml by setup.sh.
+#
+# Labels a PR "AI Provenance" when the author is the agent account, or any commit carries the
+# "Agent: pi" trailer, or any commit was authored or committed by the agent account.
+#
+# pull_request_target, not pull_request: the workflow file is taken from the base branch, so a PR
+# cannot edit this file to skip the label. That is only safe because this job never checks out or
+# runs PR code, and PR data reaches the script through env vars, never through ${{ }} in run.
+# "unlabeled" is a trigger so removing the label puts it back.
+name: AI Provenance
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, unlabeled]
+
+permissions: {}
+
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    concurrency:
+      group: ai-provenance-${{ github.event.pull_request.number }}
+    steps:
+      - name: Label agent PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          AGENT_ACCOUNT: AltitudeCloud-Logan
+          LABEL: AI Provenance
+        run: |
+          set -euo pipefail
+          commits="$(gh api --paginate "repos/$REPO/pulls/$PR/commits")"
+          messages="$(jq -rs 'add // [] | .[].commit.message | gsub("\r"; "")' <<<"$commits")"
+          logins="$(jq -rs 'add // [] | .[] | (.author.login // empty), (.committer.login // empty)' <<<"$commits")"
+          reason=""
+          if [ "$AUTHOR" = "$AGENT_ACCOUNT" ]; then
+            reason="PR author is $AGENT_ACCOUNT"
+          elif grep -Eiq '^agent:[[:space:]]*pi[[:space:]]*$' <<<"$messages"; then
+            reason="a commit carries the Agent: pi trailer"
+          elif grep -Fxq "$AGENT_ACCOUNT" <<<"$logins"; then
+            reason="a commit was authored or committed by $AGENT_ACCOUNT"
+          fi
+          if [ -z "$reason" ]; then
+            echo "No agent provenance found."
+            exit 0
+          fi
+          gh pr edit "$PR" --repo "$REPO" --add-label "$LABEL"
+          echo "Labeled \"$LABEL\": $reason" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
